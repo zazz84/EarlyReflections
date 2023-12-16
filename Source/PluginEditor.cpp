@@ -40,7 +40,32 @@ EarlyReflectionsAudioProcessorEditor::EarlyReflectionsAudioProcessorEditor (Earl
 		m_sliderAttachment[i].reset(new SliderAttachment(valueTreeState, EarlyReflectionsAudioProcessor::paramsNames[i], slider));
 	}
 
-	setSize((int)(SLIDER_WIDTH * 0.01f * SCALE * N_SLIDERS_COUNT), (int)(SLIDER_WIDTH * 0.01f * SCALE));
+	// Buttons
+	addAndMakeVisible(typeAButton);
+	addAndMakeVisible(typeBButton);
+	addAndMakeVisible(typeCButton);
+
+	typeAButton.setRadioGroupId(TYPE_BUTTON_GROUP);
+	typeBButton.setRadioGroupId(TYPE_BUTTON_GROUP);
+	typeCButton.setRadioGroupId(TYPE_BUTTON_GROUP);
+
+	typeAButton.setClickingTogglesState(true);
+	typeBButton.setClickingTogglesState(true);
+	typeCButton.setClickingTogglesState(true);
+
+	buttonAAttachment.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(valueTreeState, "ButtonA", typeAButton));
+	buttonBAttachment.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(valueTreeState, "ButtonB", typeBButton));
+	buttonCAttachment.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(valueTreeState, "ButtonC", typeCButton));
+
+	typeAButton.setColour(juce::TextButton::buttonColourId, light);
+	typeBButton.setColour(juce::TextButton::buttonColourId, light);
+	typeCButton.setColour(juce::TextButton::buttonColourId, light);
+
+	typeAButton.setColour(juce::TextButton::buttonOnColourId, dark);
+	typeBButton.setColour(juce::TextButton::buttonOnColourId, dark);
+	typeCButton.setColour(juce::TextButton::buttonOnColourId, dark);
+
+	setSize((int)(SLIDER_WIDTH * 0.01f * SCALE * N_SLIDERS_COUNT), (int)((SLIDER_WIDTH + BOTTOM_MENU_HEIGHT) * 0.01f * SCALE));
 }
 
 EarlyReflectionsAudioProcessorEditor::~EarlyReflectionsAudioProcessorEditor()
@@ -69,4 +94,12 @@ void EarlyReflectionsAudioProcessorEditor::resized()
 		rectangles[i].removeFromBottom((int)(LABEL_OFFSET * 0.01f * SCALE));
 		m_labels[i].setBounds(rectangles[i]);
 	}
+
+	// Buttons
+	const int posY = height + (int)(BOTTOM_MENU_HEIGHT * 0.01f * SCALE * 0.25f);
+	const int buttonHeight = (int)(BOTTOM_MENU_HEIGHT * 0.01f * SCALE * 0.5f);
+
+	typeAButton.setBounds((int)(getWidth() * 0.5f - buttonHeight * 1.8f), posY, buttonHeight, buttonHeight);
+	typeBButton.setBounds((int)(getWidth() * 0.5f - buttonHeight * 0.6f), posY, buttonHeight, buttonHeight);
+	typeCButton.setBounds((int)(getWidth() * 0.5f + buttonHeight * 0.6f), posY, buttonHeight, buttonHeight);
 }

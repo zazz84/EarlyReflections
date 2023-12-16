@@ -1,7 +1,31 @@
 /*
   ==============================================================================
 
-    This file contains the basic framework code for a JUCE plugin processor.
+    Room times calculation:
+
+	// Room Delay
+	const float speedOfSound = 343.0f;
+
+	// Max dimensions
+	const float h = pow(EarlyReflectionsAudioProcessor::m_roomSizeMax / 3.65f, 1.0f / 3.0f);
+	const float w = 1.6f * h;
+	const float d = 2.66f * h;
+
+	// Axial
+	const float axialHeightTime = h / speedOfSound;
+	const float axialWidthTime = w / speedOfSound;
+	const float axialDepthTime = d / speedOfSound;
+
+	// Tangential
+	const float tangentialHorizontal1Time = sqrt(d * d + 4.0f * w * w) / speedOfSound;
+	const float tangentialHorizontal2Time = sqrt(w * w + 4.0f * d * d) / speedOfSound;
+
+	const float tangentialVertical1Time = sqrt(d * d + 4.0f * h * h) / speedOfSound;
+	const float tangentialVertical2Time = sqrt(w * w + 4.0f * h * h) / speedOfSound;
+
+	Room gains calculation:
+
+	gain = 0.1224249 + 0.8558602 * exp(-40.69983 * time);
 
   ==============================================================================
 */
@@ -17,41 +41,24 @@ public:
 	CircularBuffer();
 
 	void init(int size);
+	void clear();
 	void writeSample(float sample)
 	{
-		m_buffer.setSample(0, m_head, sample);
+		m_buffer[m_head] = sample;
 		if (++m_head >= m_size)
 			m_head = 0;
 	}
-	float Read() const
+	float read() const
 	{
-		return m_buffer.getSample(0, m_head);
+		return m_buffer[m_head];
 	}
-	float readDelay(float sample);
+	float readDelay(int sample);
 	float readFactor(float factor);
-	void clear();
 
 protected:
-	juce::AudioBuffer<float> m_buffer;
+	float *m_buffer;
 	int m_head = 0;
 	int m_size = 0;
-};
-
-//==============================================================================
-class FirstOrderAllPass
-{
-public:
-	FirstOrderAllPass();
-
-	void init(int sampleRate) { m_SampleRate = sampleRate; }
-	void setCoefFrequency(float frequency);
-	void setCoef(float coef) { m_a1 = coef; }
-	float process(float in);
-
-protected:
-	int m_SampleRate;
-	float m_a1 = -1.0f; // all pass filter coeficient
-	float m_d = 0.0f;   // history d = x[n-1] - a1y[n-1]
 };
 
 //==============================================================================
@@ -63,16 +70,9 @@ public:
 	void init(int size, int sampleRate)
 	{
 		m_buffer.init(size);
-
-		m_inputFilter.init(sampleRate);
-		m_feedbackFilter.init(sampleRate);
-
-		m_inputFilter.setCoefFrequency(size * 0.43f);
-		m_feedbackFilter.setCoefFrequency(size);
 	}
-	float processSample(float inSample);
+	float process(float in);
 	void clear() { m_buffer.clear(); }
-	void setFeedback(float feedback) { m_feedback = limit(feedback, 0.0f, 1.0f); }
 	void setAbsorbtion(float absorbtion)
 	{
 		const float mel = 100.0f + (1.0f - absorbtion) * 3600.0f;
@@ -80,8 +80,6 @@ public:
 		m_a0 = limit(powf(f / 20000.0f, 0.6f), 0.0f, 1.0f);
 		m_b1 = 1.0f - m_a0;
 	}
-	void setAtternuation(float attenuation) { m_attenuation = attenuation; }
-	void setFactor(float factor) { m_factor = factor; }
 	void set(float factor, float absorbtion, float attenuation, float feedback)
 	{
 		m_factor = factor;
@@ -95,12 +93,12 @@ public:
 	}
 
 private:
+	CircularBuffer m_buffer = CircularBuffer();
+
 	float m_feedback = 0.0f;
 	float m_attenuation = 1.0f;
 	float m_factor = 1.0f;
-	CircularBuffer m_buffer = CircularBuffer();
-	FirstOrderAllPass m_inputFilter = FirstOrderAllPass();
-	FirstOrderAllPass m_feedbackFilter = FirstOrderAllPass();
+	
 	float m_last = 0.0f;
 	float m_a0 = 1.0f;
 	float m_b1 = 0.0f;
@@ -112,17 +110,19 @@ class EarlyReflectionsAudioProcessor  : public juce::AudioProcessor
                              , public juce::AudioProcessorARAExtension
                             #endif
 {
-	static const int N_DELAY_LINES = 7;
-	static const float m_sizeMin;
-	static const float m_sizeMax;
-
-
 public:
     //==============================================================================
     EarlyReflectionsAudioProcessor();
     ~EarlyReflectionsAudioProcessor() override;
 
 	static const std::string paramsNames[];
+	static const int N_ROOM_DELAY_LINES = 7;
+	static const int N_HALL_ECO_DELAY_LINES = 6;
+	static const int N_HALL_DELAY_LINES = 18;
+	static const int STEREO_ADDITION = 30;
+	static const int MINIMUM_BUFFER_SIZE = 10;
+	
+	static const int ROOM_SIZE_MAX = 2;
 
     //==============================================================================
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
@@ -166,10 +166,10 @@ private:
     //==============================================================================
 	void clearCircularBuffers()
 	{
-		for (int i = 0; i < N_DELAY_LINES; i++)
+		for (int i = 0; i < N_HALL_DELAY_LINES; i++)
 		{
-			m_SimpleDelay[0][i].clear();
-			m_SimpleDelay[1][i].clear();
+			m_delayLine[0][i].clear();
+			m_delayLine[1][i].clear();
 		}
 	}
 	
@@ -178,15 +178,94 @@ private:
 	std::atomic<float>* absorbtionParameter = nullptr;
 	std::atomic<float>* attenuationParameter = nullptr;
 	std::atomic<float>* resonanceParameter = nullptr;
-	std::atomic<float>* bitCrushParameter = nullptr;
 	std::atomic<float>* mixParameter = nullptr;
 	std::atomic<float>* volumeParameter = nullptr;
 
-	SimpleDelay m_SimpleDelay[2][N_DELAY_LINES] = {};
+	juce::AudioParameterBool* buttonAParameter = nullptr;
+	juce::AudioParameterBool* buttonBParameter = nullptr;
+	juce::AudioParameterBool* buttonCParameter = nullptr;
 
-	float m_Distances[N_DELAY_LINES] = {};
-	float m_Reflections[N_DELAY_LINES] = {1, 1, 1, 3, 3, 3, 3};
-	float m_Attenuations[N_DELAY_LINES] = {};
+	SimpleDelay m_delayLine[2][N_HALL_DELAY_LINES] = {};
+
+	const float m_roomDelayTimes[N_ROOM_DELAY_LINES] = {
+													0.0145f,
+													0.0187f,
+													0.0233f,
+													0.0242f,
+													0.0387f,
+													0.0303f,
+													0.0405f,
+	};
+
+	const float m_roomDelayGains[N_ROOM_DELAY_LINES] = {
+													0.5968f,
+													0.5228f,
+													0.4540f,
+													0.4421f,
+													0.2996f,
+													0.3718f,
+													0.2871f
+	};
+
+	const float m_hallEcoDelayTimes[N_HALL_ECO_DELAY_LINES] = {
+													0.0199f,
+													0.0354f,
+													0.0389f,
+													0.0414f,
+													0.0699f,
+													0.0796f,
+	};
+
+	const float m_hallEcoDelayGains[N_HALL_ECO_DELAY_LINES] = {
+													1.200f,
+													0.818f,
+													0.635f,
+													0.719f,
+													0.267f,
+													0.242f
+	};
+
+	const float m_hallDelayTimes[N_HALL_DELAY_LINES] = {
+													0.0043f,
+													0.0215f,
+													0.0225f,
+													0.0268f,
+													0.0270f,
+													0.0298f,
+													0.0458f,
+													0.0485f,
+													0.0572f,
+													0.0587f,
+													0.0595f,
+													0.0612f,
+													0.0707f,
+													0.0708f,
+													0.0726f,
+													0.0741f,
+													0.0753f,
+													0.0797f
+	};
+
+	const float m_hallDelayGains[N_HALL_DELAY_LINES] = {
+													0.841f,
+													0.504f,
+													0.491f,
+													0.379f,
+													0.380f,
+													0.346f,
+													0.289f,
+													0.272f,
+													0.192f,
+													0.193f,
+													0.217f,
+													0.181f,
+													0.180f,
+													0.181f,
+													0.176f,
+													0.142f,
+													0.167f,
+													0.134f
+	};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EarlyReflectionsAudioProcessor)
 };

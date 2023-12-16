@@ -26,6 +26,9 @@ public:
 	static const int SLIDER_WIDTH = 200;
 	static const int HUE = 30;
 
+	static const int TYPE_BUTTON_GROUP = 1;
+	static const int BOTTOM_MENU_HEIGHT = 50;
+
     //==============================================================================
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -40,6 +43,14 @@ private:
 	juce::Label m_labels[N_SLIDERS_COUNT] = {};
 	juce::Slider m_sliders[N_SLIDERS_COUNT] = {};
 	std::unique_ptr<SliderAttachment> m_sliderAttachment[N_SLIDERS_COUNT] = {};
+
+	juce::TextButton typeAButton{ "A" };
+	juce::TextButton typeBButton{ "B" };
+	juce::TextButton typeCButton{ "C" };
+
+	std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> buttonAAttachment;
+	std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> buttonBAttachment;
+	std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> buttonCAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EarlyReflectionsAudioProcessorEditor)
 };

@@ -18,56 +18,33 @@ void CircularBuffer::init(int size)
 {
 	m_head = 0;
 	m_size = size;
-	m_buffer.setSize(1, size);
+
+	m_buffer = NULL;
+	m_buffer = new float[size];
+	memset(m_buffer, 0, size * sizeof(float));
 }
 
 void CircularBuffer::clear()
 {
 	m_head = 0;
-	m_buffer.clear();
+	memset(m_buffer, 0, sizeof(m_buffer));
 }
 
-float CircularBuffer::readDelay(float sample)
+float CircularBuffer::readDelay(int sample)
 {
 	const int bufferSize = m_size;
-	const float readIdx = m_head + bufferSize - sample;
+	int readIdx = m_head + bufferSize - sample;
 
-	const int flr = static_cast<int>(readIdx);
-	const int iPrev = flr < bufferSize ? flr : flr - bufferSize;
-	int iNext = flr + 1;
-	iNext = iNext < bufferSize ? iNext : iNext - bufferSize;
+	if (readIdx >= bufferSize)
+		readIdx = readIdx - bufferSize;
 
-	const float weight = readIdx - flr;
-	return m_buffer.getSample(0, iPrev) * (1.f - weight) + m_buffer.getSample(0, iNext) * weight;
+	return m_buffer[readIdx];
 }
 
 float CircularBuffer::readFactor(float factor)
 {
-	float sample = 2.0f + m_size * factor * 0.98f;
+	float sample = (int)(2.0f + m_size * factor * 0.98f);
 	return readDelay(sample);
-}
-
-//==============================================================================
-FirstOrderAllPass::FirstOrderAllPass()
-{
-}
-
-void FirstOrderAllPass::setCoefFrequency(float frequency)
-{
-	if (m_SampleRate == 0)
-	{
-		return;
-	}
-
-	const float tmp = tanf(3.14 * frequency / m_SampleRate);
-	m_a1 = (tmp - 1.0f) / (tmp + 1.0f);
-}
-
-float FirstOrderAllPass::process(float in)
-{
-	const float tmp = m_a1 * in + m_d;
-	m_d = in - m_a1 * tmp;
-	return tmp;
 }
 
 //==============================================================================
@@ -75,18 +52,16 @@ SimpleDelay::SimpleDelay()
 {
 }
 
-float SimpleDelay::processSample(float inSample)
+float SimpleDelay::process(float in)
 {
 	float bufferOut = m_buffer.readFactor(m_factor);
-	m_last = m_attenuation * (m_a0 * (m_inputFilter.process(inSample) + m_feedbackFilter.process(bufferOut) * m_feedback * m_attenuation) + m_b1 * m_last);
+	m_last = m_a0 * (in + bufferOut * m_feedback) + m_b1 * m_last;	
 	m_buffer.writeSample(m_last);
 	
-	return bufferOut;
+	return m_attenuation * bufferOut;
 }
 
 //==============================================================================
-const float EarlyReflectionsAudioProcessor::m_sizeMin = 10.0f;
-const float EarlyReflectionsAudioProcessor::m_sizeMax = 1000.0f;
 const std::string EarlyReflectionsAudioProcessor::paramsNames[] = { "Size", "Absorbtion", "Attenuation", "Resonance", "Mix", "Volume" };
 
 EarlyReflectionsAudioProcessor::EarlyReflectionsAudioProcessor()
@@ -107,6 +82,10 @@ EarlyReflectionsAudioProcessor::EarlyReflectionsAudioProcessor()
 	resonanceParameter   = apvts.getRawParameterValue(paramsNames[3]);
 	mixParameter         = apvts.getRawParameterValue(paramsNames[4]);
 	volumeParameter      = apvts.getRawParameterValue(paramsNames[5]);
+
+	buttonAParameter = static_cast<juce::AudioParameterBool*>(apvts.getParameter("ButtonA"));
+	buttonBParameter = static_cast<juce::AudioParameterBool*>(apvts.getParameter("ButtonB"));
+	buttonCParameter = static_cast<juce::AudioParameterBool*>(apvts.getParameter("ButtonC"));
 }
 
 EarlyReflectionsAudioProcessor::~EarlyReflectionsAudioProcessor()
@@ -178,58 +157,15 @@ void EarlyReflectionsAudioProcessor::changeProgramName (int index, const juce::S
 //==============================================================================
 void EarlyReflectionsAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-	const float speedOfSound = 343.0f;
+	int samplesMax = MINIMUM_BUFFER_SIZE + int(m_hallDelayTimes[N_HALL_DELAY_LINES - 1] * ROOM_SIZE_MAX * sampleRate);
+
+	// TO DO: Optimize delay lines sizes
+	for (int i = 0; i < N_HALL_DELAY_LINES; i++)
+	{
+		m_delayLine[0][i].init(samplesMax, (int)sampleRate);
+		m_delayLine[1][i].init(samplesMax + STEREO_ADDITION, (int)sampleRate);
+	}
 	
-	// Max dimensions
-	const float h = pow(EarlyReflectionsAudioProcessor::m_sizeMax / 3.65f, 1.0f / 3.0f);
-	const float w = 1.6f * h;
-	const float d = 2.66f * h;
-
-	// Axial
-	const float axialHeightTime = h / speedOfSound;
-	const float axialWidthTime = w / speedOfSound;
-	const float axialDepthTime = d / speedOfSound;
-
-	// Tangential
-	const float tangentialHorizontal1Time = sqrt(d * d + 4.0f * w * w) / speedOfSound;
-	const float tangentialHorizontal2Time = sqrt(w * w + 4.0f * d * d) / speedOfSound;
-
-	const float tangentialVertical1Time = sqrt(d * d + 4.0f * h * h) / speedOfSound;
-	const float tangentialVertical2Time = sqrt(w * w + 4.0f * h * h) / speedOfSound;
-
-	// Set distances
-	// TODO: Calculate only once
-	m_Distances[0] = h;
-	m_Distances[1] = w;
-	m_Distances[2] = d;
-	m_Distances[3] = sqrt(d * d + 4.0f * w * w);
-	m_Distances[4] = sqrt(w * w + 4.0f * d * d);
-	m_Distances[5] = sqrt(d * d + 4.0f * h * h);
-	m_Distances[6] = sqrt(w * w + 4.0f * h * h);
-	
-	// Circular buffer init
-	// Left channel
-	m_SimpleDelay[0][0].init((int)(sampleRate * axialHeightTime), sampleRate);
-	m_SimpleDelay[0][1].init((int)(sampleRate * axialWidthTime), sampleRate);
-	m_SimpleDelay[0][2].init((int)(sampleRate * axialDepthTime), sampleRate);
-
-	m_SimpleDelay[0][3].init((int)(sampleRate * tangentialHorizontal1Time), sampleRate);
-	m_SimpleDelay[0][4].init((int)(sampleRate * tangentialHorizontal2Time), sampleRate);
-	m_SimpleDelay[0][5].init((int)(sampleRate * tangentialVertical1Time), sampleRate);
-	m_SimpleDelay[0][6].init((int)(sampleRate * tangentialVertical2Time), sampleRate);
-
-	// Right channel
-	const float factor = 0.99f;
-
-	m_SimpleDelay[1][0].init((int)(sampleRate * axialHeightTime * factor), sampleRate);
-	m_SimpleDelay[1][1].init((int)(sampleRate * axialWidthTime * factor), sampleRate);
-	m_SimpleDelay[1][2].init((int)(sampleRate * axialDepthTime * factor), sampleRate);
-
-	m_SimpleDelay[1][3].init((int)(sampleRate * tangentialHorizontal1Time * factor), sampleRate);
-	m_SimpleDelay[1][4].init((int)(sampleRate * tangentialHorizontal2Time * factor), sampleRate);
-	m_SimpleDelay[1][5].init((int)(sampleRate * tangentialVertical1Time * factor), sampleRate);
-	m_SimpleDelay[1][6].init((int)(sampleRate * tangentialVertical2Time * factor), sampleRate);
-
 	clearCircularBuffers();
 }
 
@@ -267,38 +203,62 @@ bool EarlyReflectionsAudioProcessor::isBusesLayoutSupported (const BusesLayout& 
 void EarlyReflectionsAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
 	// Get params
-	const float size = sizeParameter->load() / EarlyReflectionsAudioProcessor::m_sizeMax;
+	const float size = 0.01f + 0.99f * sizeParameter->load();
 	const float absorbtion = absorbtionParameter->load();
 	const float attenuation = attenuationParameter->load();
-	const float resonance = powf(resonanceParameter->load(), 0.5f);
+	const float resonance = resonanceParameter->load();
 	const float mix = mixParameter->load();
 	const float volume = juce::Decibels::decibelsToGain(volumeParameter->load());
 
-	// Distance attenuation
-	const float factor = 0.1f + (1.0f - attenuation) * 100.0f;
-	for (int i = 0; i < N_DELAY_LINES; i++)
-	{
-		m_Attenuations[i] = factor / (m_Distances[i] + factor);
-	}
+	// Buttons
+	const auto buttonA = buttonAParameter->get();
+	const auto buttonB = buttonBParameter->get();
+	const auto buttonC = buttonCParameter->get();
 
-	// Normalize based on m_Attenuations[0]
-	for (int i = 0; i < N_DELAY_LINES; i++)
-	{
-		m_Attenuations[i] /= m_Attenuations[0];
-	}
-
-	// Early reflection setup
-	for (int i = 0; i < N_DELAY_LINES; i++)
-	{
-		m_SimpleDelay[0][i].set(size, absorbtion * m_Reflections[i], m_Attenuations[i], powf(resonance, m_Reflections[i]));
-		m_SimpleDelay[1][i].set(size, absorbtion * m_Reflections[i], m_Attenuations[i], powf(resonance, m_Reflections[i]));
-	}
-	
 	// Constants
-	float mixInverse = 1.0f - mix;
 	const int channels = getTotalNumOutputChannels();
 	const int samples = buffer.getNumSamples();
+	const float mixInverse = 1.0f - mix;
 	
+	// Early reflection setup
+	int delaLinesCount = 0;
+	float volumeCompensation = 1.0f;
+	const float timeMax = m_hallDelayTimes[N_HALL_DELAY_LINES - 1];
+	const float attenuationInverse = 1.0f - attenuation;
+	const float *times;
+	const float *gains;
+
+	if (buttonA)
+	{
+		delaLinesCount = N_ROOM_DELAY_LINES;
+		times = m_roomDelayTimes;
+		gains = m_roomDelayGains;
+	}
+	else if(buttonB)
+	{
+		delaLinesCount = N_HALL_DELAY_LINES;
+		volumeCompensation = 0.75;
+		times = m_hallDelayTimes;
+		gains = m_hallDelayGains;
+	}
+	else
+	{
+		delaLinesCount = N_HALL_ECO_DELAY_LINES;
+		volumeCompensation = 0.6;
+		times = m_hallEcoDelayTimes;
+		gains = m_hallEcoDelayGains;
+	}
+
+	for (int i = 0; i < delaLinesCount; i++)
+	{
+		const float gain = volumeCompensation * (gains[i] + (1.0f - gains[i]) * attenuationInverse);
+		const float factor = size * times[i] / timeMax;
+
+		m_delayLine[0][i].set(factor, absorbtion, gain, resonance);
+		m_delayLine[1][i].set(factor, absorbtion, gain, resonance);
+	}
+
+	// Process samples
 	for (int channel = 0; channel < channels; ++channel)
 	{
 		auto* channelBuffer = buffer.getWritePointer(channel);
@@ -309,9 +269,9 @@ void EarlyReflectionsAudioProcessor::processBlock (juce::AudioBuffer<float>& buf
 
 			float out = 0.0f;
 
-			for (int i = 0; i < N_DELAY_LINES; i++)
+			for (int i = 0; i < delaLinesCount; i++)
 			{
-				out += m_SimpleDelay[channel][i].processSample(in);
+				out += m_delayLine[channel][i].process(in);
 			}
 
 			channelBuffer[sample] = volume * (mix * out + mixInverse * in);
@@ -353,12 +313,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout EarlyReflectionsAudioProcess
 
 	using namespace juce;
 
-	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[0], paramsNames[0], NormalisableRange<float>(EarlyReflectionsAudioProcessor::m_sizeMin, EarlyReflectionsAudioProcessor::m_sizeMax, 10.0f, 1.0f), 500.0f));
-	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[1], paramsNames[1], NormalisableRange<float>(  0.0f,  1.0f, 0.01f, 1.0f), 0.5f));
-	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[2], paramsNames[2], NormalisableRange<float>(  0.0f,  1.0f, 0.01f, 1.0f), 0.5f));
-	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[3], paramsNames[3], NormalisableRange<float>(  0.0f,  1.0f, 0.01f, 1.0f), 0.5f));
+	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[0], paramsNames[0], NormalisableRange<float>(  0.0f, 1.0f,  0.01f, 1.0f), 0.5f));
+	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[1], paramsNames[1], NormalisableRange<float>(  0.0f,  1.0f, 0.01f, 1.0f), 0.0f));
+	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[2], paramsNames[2], NormalisableRange<float>(  0.0f,  1.0f, 0.01f, 1.0f), 1.0f));
+	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[3], paramsNames[3], NormalisableRange<float>(  0.0f,  1.0f, 0.01f, 1.0f), 0.0f));
 	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[4], paramsNames[4], NormalisableRange<float>(  0.0f,  1.0f, 0.01f, 1.0f), 0.5f));
 	layout.add(std::make_unique<juce::AudioParameterFloat>(paramsNames[5], paramsNames[5], NormalisableRange<float>(-12.0f, 12.0f,  0.1f, 1.0f), 0.0f));
+
+	layout.add(std::make_unique<juce::AudioParameterBool>("ButtonA", "ButtonA", true));
+	layout.add(std::make_unique<juce::AudioParameterBool>("ButtonB", "ButtonB", false));
+	layout.add(std::make_unique<juce::AudioParameterBool>("ButtonC", "ButtonC", false));
 
 	return layout;
 }
